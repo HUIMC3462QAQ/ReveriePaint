@@ -1401,6 +1401,11 @@ private:
     // beginTileFrame 留下的投影引用, 供同一帧的 renderTileToBuffer 复用。
     // KisPaintDeviceSP 只是 shared pointer 拷贝, 不持有额外像素。
     KisPaintDeviceSP m_tileFrameProjection;
+    // undo/redo 里 waitForDone() 之后, Krita 的异步合并器已把根投影合并到最新; 这一帧
+    // 渲染侧不必再从零合成 (大画布 43 层 × 整幅 ≈ 374 Mpx, 是撤销 1~8s 的主体开销)。
+    // 任何新的脏区 (markStrokeDirty / setDirtyFullFrame) 都会清掉该标记, 所以它只对
+    // "紧接在撤销/重做之后的那一帧"生效, 不会影响后续运笔。
+    bool m_projectionMergedByKrita = false;
     void markBlendChanged(int index);  // blend-only change: targeted thumb invalidation
     void flipCanvasCommon(bool horizontal); // flipCanvasHorizontal/Vertical shared body
 
@@ -1418,6 +1423,8 @@ private:
     // 运笔内部标脏: 本笔只改当前层 k, 而底图是 [0, b) 且 b <= k (见 strokeStaticUnderlayStop),
     // 底图不受影响, 只登记脏区。
     void markStrokeDirty(const QRect &r) {
+        // 有新脏区就说明投影又落后于图层了, 撤销/重做留下的"可信任"标记随即作废。
+        m_projectionMergedByKrita = false;
         m_dirtyRect = m_dirtyRect.isNull() ? r : m_dirtyRect.united(r);
         addDirtyRegion(r);
         if (m_dirtyCb) m_dirtyCb(m_dirtyCtx);
@@ -1437,6 +1444,7 @@ private:
     }
     // 整幅画布标脏 (缓冲重置 / 文档尺寸变化), 列表同步收敛成这一整块。
     void setDirtyFullFrame(const QRect &full) {
+        m_projectionMergedByKrita = false;
         invalidateStaticUnderlay();
         m_dirtyRect = full;
         m_dirtyRects.clear();

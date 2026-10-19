@@ -9,6 +9,7 @@
  * ============================================================ */
 #include "ReverieCoreInternal.h"
 #include "ReverieCoreUndoStore.h"
+#include "RenderLockGate.h"
 #include <strokes/KisMaskingBrushRenderer.h>
 #include <strokes/KisMaskedFreehandStrokePainter.h>
 #include <KisFreehandStrokeInfo.h>
@@ -1543,6 +1544,13 @@ void ReverieCore::undo()
         }
     }
     markDirty();
+    // 上面已经 waitForDone() 过 (结构变化时 recompositeProjection 里还会再等一次), 根投影
+    // 此刻由 Krita 的异步合并器保证是最新的。标记给渲染侧, 让它跳过本帧的 43 层全量重合成,
+    // 只做整帧读回 —— 撤销延迟的主体从"整幅重合成"降到"整幅读回+上传"。
+    // 该标记会被下一个新脏区 (markStrokeDirty / setDirtyFullFrame) 清掉。
+    if (reverie::mayWaitForImage(m_document->locked())) {
+        m_projectionMergedByKrita = true;
+    }
     m_snapshotPending = false;
 }
 
@@ -1610,6 +1618,10 @@ void ReverieCore::redo()
         }
     }
     markDirty();
+    // 同 undo(): 合并器已跑完, 本帧跳过整幅重合成, 只做读回。
+    if (reverie::mayWaitForImage(m_document->locked())) {
+        m_projectionMergedByKrita = true;
+    }
     m_snapshotPending = false;
 }
 

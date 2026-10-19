@@ -42,6 +42,9 @@ void ReverieCore::addDirtyRegion(const QRect &r)
     if (r.isEmpty()) {
         return;
     }
+    // 任何新增脏区都意味着投影又落后于图层了: 撤销/重做留下的"投影已新鲜"标记
+    // (m_projectionMergedByKrita) 立即作废, 避免渲染侧据此跳过一次该做的合成。
+    m_projectionMergedByKrita = false;
     const int docW = m_document ? m_document->width() : m_docWidth;
     const int docH = m_document ? m_document->height() : m_docHeight;
     if (docW <= 0 || docH <= 0) {
@@ -354,12 +357,21 @@ bool ReverieCore::renderToBuffer(quint8 *buffer, int w, int h, bool forceFull)
                     break;
                 }
             }
-            if (m_drawing || hasSpecialCompositeLayer || !m_dirtyRect.isEmpty()) {
+            // m_projectionMergedByKrita: undo/redo 里已经 waitForDone() 过, 根投影就是最新的
+            // (和 gate.waitForMerger 分支同一个结论), 这一帧不必再把 43 层从零合成一遍。
+            // 特殊层 (描边层/透明蒙版) 与 solo 仍走同步合成, 保持既有语义不变。
+            const bool projectionAlreadyMerged =
+                m_projectionMergedByKrita && !m_drawing && !hasSpecialCompositeLayer;
+            if (m_drawing || hasSpecialCompositeLayer ||
+                (!projectionAlreadyMerged && !m_dirtyRect.isEmpty())) {
                 // 逐块合成离散脏区, 不再先把几处笔迹并成一个大包围盒再整体合成。
                 compositeDirtyRegions(proj);
             }
         }
     }
+    // 标记只对紧接撤销/重做的那一帧有效; 无论本帧走哪条分支, 用完即清 (solo/合并器等
+    // 分支已经把投影弄对了, 留着只会影响下一帧的判据)。
+    m_projectionMergedByKrita = false;
     if (!proj) {
         return false;
     }
@@ -546,11 +558,18 @@ int ReverieCore::beginTileFrame(QRect *outRects, int cap)
                     break;
                 }
             }
-            if (m_drawing || hasSpecialCompositeLayer || !m_dirtyRect.isEmpty()) {
+            // 与 renderToBuffer 同一判据: undo/redo 已经等过合并器, 根投影是最新的,
+            // 这一帧不再从零合成整幅 (大画布 43 层 ≈ 374 Mpx)。
+            const bool projectionAlreadyMerged =
+                m_projectionMergedByKrita && !m_drawing && !hasSpecialCompositeLayer;
+            if (m_drawing || hasSpecialCompositeLayer ||
+                (!projectionAlreadyMerged && !m_dirtyRect.isEmpty())) {
                 compositeDirtyRegions(proj);
             }
         }
     }
+    // 与 renderToBuffer 一致: 标记用完即清, 只影响紧接撤销/重做的那一帧。
+    m_projectionMergedByKrita = false;
     if (!proj) {
         return 0;
     }
