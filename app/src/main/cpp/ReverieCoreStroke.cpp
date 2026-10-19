@@ -1386,8 +1386,12 @@ void ReverieCore::endStrokeBatch()
     m_strokeOp = nullptr;
     delete m_strokeDistance;
     m_strokeDistance = nullptr;
-    m_randomSource.clear();
-    m_perStrokeRandomSource.clear();
+    // 不要在这里清空 m_randomSource / m_perStrokeRandomSource:
+    // flushStrokeBatch 的"笔画准备段"会先调 endStrokeBatch() 再重建 painter/transaction,
+    // 而随机源只在 touchStrokeStart 创建。若在此清空, 每一笔在第一次 flush 时就丢掉随机源
+    // (此后 info.setRandomSource 拿到空指针), 抖动/散布/随机尺寸等动态全部失效, 且 Krita
+    // 每次 paintop 初始化都会刷一条 "Accessing uninitialized random source!"。
+    // 随机源随下一笔的 touchStrokeStart 重新赋值(新种子), 这里保留即可。
 }
 
 // ---------------------------------------------------------------------------
