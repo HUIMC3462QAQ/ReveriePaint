@@ -1503,6 +1503,8 @@ bool ReverieCore::loadRevp(const QString &path)
     m_undoStore = new ReverieUndoStore();
     m_undoStore->setUndoLimit(m_undoLimit);
     m_redoCount = 0;
+    // 旧撤销栈连同命令一起销毁: 脏区缓存里的指针全部失效, 必须清空。
+    resetUndoRectCache();
 
     const KoColorSpace *cs = KoColorSpaceRegistry::instance()->rgb8();
     if (!cs) {
@@ -1921,6 +1923,8 @@ bool ReverieCore::loadPsd(const QString &path)
     m_undoStore = new ReverieUndoStore();
     m_undoStore->setUndoLimit(m_undoLimit);
     m_redoCount = 0;
+    // 旧撤销栈连同命令一起销毁: 脏区缓存里的指针全部失效, 必须清空。
+    resetUndoRectCache();
 
     const KoColorSpace *cs = KoColorSpaceRegistry::instance()->rgb8();
     if (!cs) {

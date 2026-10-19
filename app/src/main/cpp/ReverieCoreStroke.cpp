@@ -113,6 +113,9 @@ void ReverieCore::touchStrokeStart(qreal x, qreal y, qreal pressure, qreal tiltX
     m_snapshotPending = true;
     m_drawing = true;
     m_strokeBatchOpen = true;
+    // 记住落笔时的栈顶: 收笔时用它判断本笔是否真的压了命令 (见 commitPendingUndoRect)。
+    m_undoTopAtStrokeStart = m_undoStore ? m_undoStore->presentCommand() : nullptr;
+    m_pendingUndoRect = QRect();
     m_lastPressure = pressure;
     m_lastTiltX = tiltX;
     m_lastTiltY = tiltY;
@@ -575,6 +578,13 @@ void ReverieCore::touchStrokeEnd()
             QRect(0, 0, m_document->width(), m_document->height()));
         if (!totalDirty.isEmpty()) {
             markStrokeDirty(totalDirty);
+            // 这一块就是本笔撤销时会回滚的范围: 登记下来, 撤销/重做只重算它。
+            // 对称笔画下命令被包在最外层宏里, 宏未关时 presentCommand() 还看不到,
+            // 所以先暂存, 由 endUndoMacro() 在 depth 归零时提交。
+            m_pendingUndoRect = totalDirty;
+            if (m_macroDepth == 0) {
+                commitPendingUndoRect();
+            }
         }
     }
 
@@ -588,6 +598,9 @@ void ReverieCore::touchStrokeCancel()
 {
     // s12-F1/H3: 取消后迟到的镜像批一律按过期丢弃
     m_mirrorStrokeSeq = 0;
+    // 取消的笔画会 revert 掉事务、不产生撤销命令: 暂存的矩形也必须丢弃,
+    // 否则会被挂到下一笔的命令上, 导致撤销时漏刷。
+    m_pendingUndoRect = QRect();
     m_mirrorLiveStarted = false;
     if (!m_document || !m_strokeBatchOpen) {
         m_drawing = false;
@@ -1437,6 +1450,70 @@ void ReverieCore::clearUndoHistory()
     }
     m_undoStore->clear();
     m_redoCount = 0;
+    resetUndoRectCache();
+}
+
+// ---------------------------------------------------------------------------
+// 撤销脏区缓存: 把"每条撤销命令影响了哪一块"记下来, 撤销/重做时只重算这一块。
+// Krita 的 KisTransactionData 没有暴露 dirtyRegion(), 所以只能在笔画结束时按
+// m_accumulatedStrokeBounds(+裕量) 自己登记 —— 这也正是对标画世界 Pro 的关键:
+// 撤销开销从 O(画布 x 图层) 降到 O(笔迹包围盒)。
+// ---------------------------------------------------------------------------
+
+void ReverieCore::resetUndoRectCache()
+{
+    // 撤销栈被整体销毁/重建时, 缓存里的 KUndo2Command 指针会全部失效, 必须清空。
+    m_undoRects.clear();
+    m_pendingUndoRect = QRect();
+    m_undoTopAtStrokeStart = nullptr;
+}
+
+void ReverieCore::pruneUndoRects()
+{
+    if (m_undoRects.isEmpty()) {
+        return;
+    }
+    if (!m_undoStore) {
+        m_undoRects.clear();
+        return;
+    }
+    // 只保留仍在栈里的命令。栈上限淘汰 / purgeRedoState 会 delete 掉命令,
+    // 残留的悬垂指针可能被新命令复用, 从而把旧矩形套到新命令上 (画面残留)。
+    // 栈上限默认 50, 这里是 O(n^2) 但 n 很小, 且每笔只跑一次。
+    const int n = m_undoStore->count();
+    for (auto it = m_undoRects.begin(); it != m_undoRects.end();) {
+        bool alive = false;
+        for (int i = 0; i < n; ++i) {
+            if (m_undoStore->commandAt(i) == it.key()) {
+                alive = true;
+                break;
+            }
+        }
+        if (alive) {
+            ++it;
+        } else {
+            it = m_undoRects.erase(it);
+        }
+    }
+}
+
+void ReverieCore::commitPendingUndoRect()
+{
+    if (m_pendingUndoRect.isEmpty() || !m_undoStore) {
+        return;
+    }
+    // 顶层命令: 普通笔画是本笔的 KisTransactionData; 对称笔画是最外层宏
+    // (必须等 endUndoMacro 之后才可见, 见调用点)。
+    const KUndo2Command *top = m_undoStore->presentCommand();
+    if (!top || top == m_undoTopAtStrokeStart) {
+        // 栈顶没变 = 本笔没有产生撤销命令 (无墨点 / 图层检查拒绝 / 事务被回滚),
+        // 绝不能把矩形挂到上一笔的命令上, 否则撤销上一笔时只刷到错误区域。
+        m_pendingUndoRect = QRect();
+        return;
+    }
+    pruneUndoRects();
+    m_undoRects.insert(top, m_pendingUndoRect);
+    m_pendingUndoRect = QRect();
 }
 
 void ReverieCore::setUndoLimit(int limit)
@@ -1462,6 +1539,10 @@ void ReverieCore::endUndoMacro()
     if (m_document && m_document->undoAdapter() && m_macroDepth > 0) {
         m_document->undoAdapter()->endMacro();
         m_macroDepth--;
+        // 最外层宏关闭后, 顶层命令才在栈上可见: 这时才把暂存的本笔矩形挂到它身上。
+        if (m_macroDepth == 0) {
+            commitPendingUndoRect();
+        }
     }
 }
 
@@ -1499,6 +1580,11 @@ void ReverieCore::undo()
     const bool isStructuralCmd = dynamic_cast<const KisImageLayerAddCommand *>(cmd) != nullptr ||
                                  dynamic_cast<const KisImageLayerRemoveCommand *>(cmd) != nullptr ||
                                  dynamic_cast<const KisImageLayerMoveCommand *>(cmd) != nullptr;
+
+    // 先清掉已不在栈里的命令(悬垂指针), 再查本命令登记的矩形。
+    // 命中 ⇒ 只重算笔迹包围盒; 未命中(滤镜/变换/图层操作等) ⇒ 退回整帧路径。
+    pruneUndoRects();
+    const QRect undoneRect = m_undoRects.value(cmd, QRect());
 
     m_undoStore->undo();
     ++m_redoCount;
@@ -1543,10 +1629,20 @@ void ReverieCore::undo()
             }
         }
     }
-    markDirty();
+    if (undoneRect.isEmpty()) {
+        markDirty();
+    } else {
+        // 只把这条命令真正影响的区域标脏: 合成、读回、瓦片上传都退化成"笔迹包围盒"
+        // 量级, 与画布面积 / 图层数解耦 —— 这是对标画世界 Pro 即时撤销的关键。
+        markRegionDirty(undoneRect);
+        // 内容变了, 缩略图仍全量作废 (真正重建由图层面板按需触发, 这里只是标脏)。
+        for (auto it = m_thumbCache.begin(); it != m_thumbCache.end(); ++it) {
+            ++it->gen;
+        }
+    }
     // 上面已经 waitForDone() 过 (结构变化时 recompositeProjection 里还会再等一次), 根投影
-    // 此刻由 Krita 的异步合并器保证是最新的。标记给渲染侧, 让它跳过本帧的 43 层全量重合成,
-    // 只做整帧读回 —— 撤销延迟的主体从"整幅重合成"降到"整幅读回+上传"。
+    // 此刻由 Krita 的异步合并器保证是最新的。标记给渲染侧, 让它跳过本帧的 43 层全量重合成。
+    // 读回范围由上面的脏区决定: 命中命令矩形时只有笔迹包围盒, 否则退回整帧。
     // 该标记会被下一个新脏区 (markStrokeDirty / setDirtyFullFrame) 清掉。
     if (reverie::mayWaitForImage(m_document->locked())) {
         m_projectionMergedByKrita = true;
@@ -1576,6 +1672,9 @@ void ReverieCore::redo()
 
     m_undoStore->redo();
     --m_redoCount;
+    // 重做后 presentCommand() 就是刚被重做的那条; 取它登记的矩形做局部刷新。
+    pruneUndoRects();
+    const QRect redoneRect = m_undoRects.value(m_undoStore->presentCommand(), QRect());
     m_document->waitForDone();
     syncLayersFromImage();
 
@@ -1617,8 +1716,15 @@ void ReverieCore::redo()
             }
         }
     }
-    markDirty();
-    // 同 undo(): 合并器已跑完, 本帧跳过整幅重合成, 只做读回。
+    if (redoneRect.isEmpty()) {
+        markDirty();
+    } else {
+        markRegionDirty(redoneRect);
+        for (auto it = m_thumbCache.begin(); it != m_thumbCache.end(); ++it) {
+            ++it->gen;
+        }
+    }
+    // 同 undo(): 合并器已跑完, 本帧跳过整幅重合成; 读回范围看 redoneRect。
     if (reverie::mayWaitForImage(m_document->locked())) {
         m_projectionMergedByKrita = true;
     }

@@ -1524,6 +1524,19 @@ private:
     int m_undoLimit = 50;
     int m_redoCount = 0;   // redo depth tracked locally (store hides it)
     int m_macroDepth = 0;  // nested macro transaction depth
+    // 撤销命令 → 该命令影响到的文档矩形。Krita 的 KisTransactionData 没有暴露脏区接口,
+    // 所以由我们在笔画结束时按 m_accumulatedStrokeBounds(+裕量) 记一份: 撤销/重做时只把
+    // 这一块标脏, 合成与读回都退化成"笔迹包围盒"量级 (对标画世界 Pro 的即时撤销)。
+    // 键是 KUndo2Command 指针, 栈底淘汰/清栈后必须清理, 见 pruneUndoRects()。
+    QHash<const KUndo2Command *, QRect> m_undoRects;
+    // 笔画结束到"最外层撤销宏关闭"之间暂存的矩形 (对称笔画的顶层命令要等宏关闭才可见)。
+    QRect m_pendingUndoRect;
+    // 落笔时的栈顶命令。用于判断"这一笔到底有没有压栈": 没出墨/被拒的笔画不会产生命令,
+    // 此时 presentCommand() 仍是上一笔, 绝不能把本笔矩形挂上去 (会覆盖上一笔的脏区)。
+    const KUndo2Command *m_undoTopAtStrokeStart = nullptr;
+    void resetUndoRectCache();
+    void commitPendingUndoRect();
+    void pruneUndoRects();
     bool m_undoCaptureEnabled = true; // false during replay (no history growth)
     quint64 m_strokeCounter = 0;
     qreal m_lastSimulatedFlushTime = 0.0;

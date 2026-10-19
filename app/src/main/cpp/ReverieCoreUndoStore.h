@@ -44,6 +44,8 @@ public:
     bool canRedo() const;
     int count() const;
     int index() const;
+    /** 按栈内下标取顶层命令 (越界返回 nullptr)。给"命令 → 撤销脏区"缓存做存活清理用。 */
+    const KUndo2Command *commandAt(int stackIndex) const;
 
 private:
     KUndo2Stack *m_undoStack;

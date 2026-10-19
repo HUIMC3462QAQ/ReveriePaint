@@ -108,6 +108,14 @@ bool ReverieUndoStore::canRedo() const
     return m_undoStack && m_undoStack->canRedo();
 }
 
+const KUndo2Command *ReverieUndoStore::commandAt(int stackIndex) const
+{
+    if (!m_undoStack || stackIndex < 0 || stackIndex >= m_undoStack->count()) {
+        return nullptr;
+    }
+    return m_undoStack->command(stackIndex);
+}
+
 int ReverieUndoStore::count() const
 {
     return m_undoStack ? m_undoStack->count() : 0;
