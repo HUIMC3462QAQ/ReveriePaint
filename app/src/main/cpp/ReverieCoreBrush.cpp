@@ -1103,7 +1103,10 @@ bool ReverieCore::ensurePresetInfo(int index, CachedPresetInfo &out)
     if (!(spacing > 0.0) || spacing != spacing) {
         spacing = s->getDouble("spacing", 0.15);
     }
-    if (!(spacing > 0.0) || spacing != spacing || spacing >= 0.75) {
+    // 只兜底非法值, 不再把 ">=0.75" 当异常压成 0.15: spacing 是"笔尖直径的比例",
+    // 1.0(100%) / 2.0(200%) 对盖章、点状、纹理笔刷都是合法且常用的值。原逻辑会把它们
+    // 统一改成 15%, UI 一显示/一回写就把点状笔刷变成连续涂抹。
+    if (!(spacing > 0.0) || spacing != spacing) {
         spacing = 0.15;
     }
     spacing = qBound(0.01, spacing, 2.5);
